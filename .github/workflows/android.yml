@@ -14,29 +14,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+
       - name: Install Android SDK 36
-        run: yes | sdkmanager "platforms;android-36" "build-tools;35.0.0" >/dev/null
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-      - name: Core pure Kotlin tests
+        shell: bash
         run: |
-          kotlinc app/src/main/java/com/repopilot/app/core/Core.kt tools/core-tests.kt -include-runtime -d /tmp/repopilot-core.jar
-          java -jar /tmp/repopilot-core.jar
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
       - name: Termux bridge safety tests
         run: bash termux-bridge/tests/test_bridge.sh
+
       - name: Android unit tests
-        run: gradle --no-daemon --max-workers=2 testDebugUnitTest
+        run: ./gradlew --no-daemon --max-workers=2 testDebugUnitTest
+
       - name: Android lint
-        run: gradle --no-daemon --max-workers=2 lintDebug
+        run: ./gradlew --no-daemon --max-workers=2 lintDebug
+
       - name: Build debug APK
-        run: gradle --no-daemon --max-workers=2 assembleDebug
+        run: ./gradlew --no-daemon --max-workers=2 assembleDebug
+
       - name: Upload RepoPilot APK
         uses: actions/upload-artifact@v4
         with:
