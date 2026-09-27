@@ -1,0 +1,158 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# RepoPilot Termux execution bridge. No eval, no arbitrary command execution.
+set -euo pipefail
+
+say() { printf '%s\n' "$*"; }
+fail() { say "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "$1 is not installed"; }
+repo_root() {
+  local requested="${1:-}" root
+  [ -n "$requested" ] || fail "repository path required"
+  [ -d "$requested" ] || fail "repository path does not exist: $requested"
+  root="$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null)" || fail "not a Git repository: $requested"
+  printf '%s' "$root"
+}
+assert_repo_safe() {
+  local r="$1"
+  [ -d "$r/.git" ] || fail "repository root is invalid"
+  if [ -e "$r/.git/MERGE_HEAD" ] || [ -d "$r/.git/rebase-merge" ] || [ -d "$r/.git/rebase-apply" ] || [ -e "$r/.git/CHERRY_PICK_HEAD" ]; then
+    fail "Git merge/rebase/cherry-pick is already in progress"
+  fi
+}
+assert_clean() {
+  local r="$1"
+  [ -z "$(git -C "$r" status --porcelain)" ] || fail "working tree has uncommitted changes; RepoPilot will not discard them"
+}
+current_branch() { git -C "$1" symbolic-ref --quiet --short HEAD 2>/dev/null || true; }
+assert_fix_branch() {
+  local b
+  b="$(current_branch "$1")"
+  [ -n "$b" ] || fail "detached HEAD is not safe for commit/push"
+  case "$b" in main|master) fail "protected branch $b: direct commit/push is blocked";; esac
+  case "$b" in fix/*) :;; *) fail "only fix/* branches may be committed/pushed by RepoPilot";; esac
+}
+patch_file() {
+  local encoded="$1" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/repopilot-patch.XXXXXX")"
+  printf '%s' "$encoded" | base64 -d > "$tmp" 2>/dev/null || { rm -f "$tmp"; fail "invalid base64 patch"; }
+  grep -q '^diff --git a/' "$tmp" || { rm -f "$tmp"; fail "patch has no unified git diff"; }
+  grep -q 'GIT binary patch' "$tmp" && { rm -f "$tmp"; fail "binary patches are blocked"; }
+  while IFS= read -r line; do
+    case "$line" in
+      "diff --git a/"*)
+        local a b
+        a="${line#diff --git a/}"; a="${a%% b/*}"
+        b="${line#* b/}"
+        case "/$a/" in *"/../"*) rm -f "$tmp"; fail "patch path traversal blocked";; esac
+        case "/$b/" in *"/../"*) rm -f "$tmp"; fail "patch path traversal blocked";; esac
+        case "$a" in .git|.git/*|/*|~*) rm -f "$tmp"; fail "unsafe patch path blocked";; esac
+        case "$b" in .git|.git/*|/*|~*) rm -f "$tmp"; fail "unsafe patch path blocked";; esac
+      ;;
+    esac
+  done < "$tmp"
+  printf '%s' "$tmp"
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  environment-status)
+    say "RepoPilot environment"
+    for x in git bash base64; do if command -v "$x" >/dev/null 2>&1; then say "OK: $x=$(command -v "$x")"; else say "MISSING: $x"; fi; done
+    if command -v java >/dev/null 2>&1; then java -version 2>&1 | head -1; else say "MISSING: java"; fi
+    if command -v gh >/dev/null 2>&1; then gh auth status 2>&1 || true; else say "MISSING: gh (only needed for some GitHub auth workflows)"; fi
+    say "OK: bridge=$0"
+  ;;
+  repo-open)
+    need git
+    path="${1:-}"; url="${2:-}"
+    [ -n "$path" ] && [ -n "$url" ] || fail "usage: repo-open <path> <github-url>"
+    if [ -d "$path/.git" ]; then say "OPENED: $(git -C "$path" rev-parse --show-toplevel)"; git -C "$path" status -sb; exit 0; fi
+    case "$url" in https://github.com/*|git@github.com:*) :;; *) fail "only GitHub repository URLs are accepted";; esac
+    parent="$(dirname "$path")"; mkdir -p "$parent"
+    [ ! -e "$path" ] || fail "destination exists but is not a Git repository"
+    git clone -- "$url" "$path"
+    say "CLONED: $path"
+  ;;
+  repo-clone)
+    need git
+    url="${1:-}"; path="${2:-}"; [ -n "$url" ] && [ -n "$path" ] || fail "usage: repo-clone <url> <path>"
+    case "$url" in https://github.com/*|git@github.com:*) :;; *) fail "only GitHub repository URLs are accepted";; esac
+    mkdir -p "$(dirname "$path")"; git clone -- "$url" "$path"; say "CLONED: $path"
+  ;;
+  git-status)
+    need git; r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
+    git -C "$r" status -sb; say "branch: $(current_branch "$r")"; say "remote: $(git -C "$r" remote get-url origin 2>/dev/null || echo missing)"
+  ;;
+  git-pull)
+    need git; r="$(repo_root "${1:-}")"; assert_repo_safe "$r"; assert_clean "$r"
+    b="$(current_branch "$r")"; [ -n "$b" ] || fail "detached HEAD"
+    git -C "$r" pull --ff-only; say "PULL_OK"
+  ;;
+  scan)
+    need git; r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
+    say "SCAN: $r"; git -C "$r" status -sb
+    b="$(current_branch "$r")"; [ -n "$b" ] || say "ERROR: detached HEAD"
+    [ -n "$(git -C "$r" remote 2>/dev/null)" ] || say "WARNING: missing Git remote"
+    if [ -n "$(git -C "$r" status --porcelain)" ]; then say "WARNING: uncommitted changes detected"; fi
+    if [ -f "$r/gradlew" ]; then
+      [ -x "$r/gradlew" ] || say "ERROR: gradlew permission denied (wrapper is not executable)"
+      [ -f "$r/gradle/wrapper/gradle-wrapper.properties" ] || say "ERROR: Gradle wrapper properties missing"
+    elif [ -f "$r/settings.gradle" ] || [ -f "$r/settings.gradle.kts" ]; then say "ERROR: Gradle project has no gradlew wrapper"; fi
+    tracked_env="$(git -C "$r" ls-files | grep -E '(^|/)(\.env|.*\.jks|.*\.keystore)$' || true)"
+    [ -z "$tracked_env" ] || say "WARNING: likely secret-bearing files are tracked: $tracked_env"
+    if [ -d "$r/.github/workflows" ]; then
+      grep -RInE 'java-version:[[:space:]]*["'\'' ]?(8|11)["'\'' ]?$' "$r/.github/workflows" 2>/dev/null | head -20 || true
+    fi
+    say "SCAN_COMPLETE"
+  ;;
+  build|test)
+    r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
+    [ -f "$r/gradlew" ] || fail "gradlew is missing"
+    [ -x "$r/gradlew" ] || fail "gradlew permission denied"
+    task="assembleDebug"; [ "$cmd" = test ] && task="testDebugUnitTest"
+    say "RUNNING: ./gradlew --no-daemon --max-workers=2 $task"
+    (cd "$r" && ./gradlew --no-daemon --max-workers=2 "$task")
+    if [ "$cmd" = build ]; then
+      apk="$(find "$r" -path '*/build/outputs/apk/debug/*.apk' -type f 2>/dev/null | head -1 || true)"
+      [ -n "$apk" ] && say "APK: $apk" || say "WARNING: build succeeded but debug APK path was not found"
+    fi
+    say "${cmd^^}_OK"
+  ;;
+  diff)
+    r="$(repo_root "${1:-}")"; git -C "$r" diff --no-ext-diff --; git -C "$r" diff --cached --no-ext-diff --
+  ;;
+  apply-patch-check)
+    r="$(repo_root "${1:-}")"; encoded="${2:-}"; branch="${3:-}"; assert_repo_safe "$r"; assert_clean "$r"
+    case "$branch" in fix/*) :;; *) fail "fix branch must start with fix/";; esac
+    tmp="$(patch_file "$encoded")"; trap 'rm -f "$tmp"' EXIT
+    git -C "$r" apply --check --whitespace=error-all "$tmp"; say "PATCH_CHECK_OK"
+  ;;
+  apply-patch)
+    r="$(repo_root "${1:-}")"; encoded="${2:-}"; branch="${3:-}"; assert_repo_safe "$r"; assert_clean "$r"
+    case "$branch" in fix/*) :;; *) fail "fix branch must start with fix/";; esac
+    tmp="$(patch_file "$encoded")"; trap 'rm -f "$tmp"' EXIT
+    git -C "$r" apply --check --whitespace=error-all "$tmp"
+    if git -C "$r" show-ref --verify --quiet "refs/heads/$branch"; then git -C "$r" switch "$branch"; else git -C "$r" switch -c "$branch"; fi
+    git -C "$r" apply --whitespace=error-all "$tmp"; say "PATCH_APPLIED"; say "branch: $branch"
+  ;;
+  rollback)
+    r="$(repo_root "${1:-}")"; encoded="${2:-}"; assert_repo_safe "$r"
+    tmp="$(patch_file "$encoded")"; trap 'rm -f "$tmp"' EXIT
+    git -C "$r" apply -R --check "$tmp"; git -C "$r" apply -R "$tmp"; say "ROLLBACK_OK"
+  ;;
+  commit)
+    r="$(repo_root "${1:-}")"; msg="${2:-}"; assert_repo_safe "$r"; assert_fix_branch "$r"
+    [ -n "$(git -C "$r" status --porcelain)" ] || fail "nothing to commit"
+    [ -n "$msg" ] || fail "commit message required"
+    git -C "$r" add -A; git -C "$r" commit -m "$msg"; say "COMMIT_OK: $(git -C "$r" rev-parse --short HEAD)"
+  ;;
+  push)
+    r="$(repo_root "${1:-}")"; assert_repo_safe "$r"; assert_fix_branch "$r"
+    b="$(current_branch "$r")"; git -C "$r" push -u origin "$b"; say "PUSH_OK: $b"
+  ;;
+  gradle-cache-clean)
+    r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
+    rm -rf -- "$r/.gradle" "$r/build" "$r/app/build"; say "CACHE_CLEAN_OK"
+  ;;
+  *) fail "unknown command: ${cmd:-<empty>}";;
+esac
