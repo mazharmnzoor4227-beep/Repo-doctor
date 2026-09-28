@@ -236,6 +236,7 @@ class AppController(private val activity: ComponentActivity) {
         }.start()
     }
 
+    @kotlin.jvm.JvmName("applyPendingPatchInput")
     fun setPendingPatch(value: String) {
         pendingPatch = value
     }
@@ -285,6 +286,7 @@ class AppController(private val activity: ComponentActivity) {
         runBridge("push", listOf(repo.path), "push")
     }
 
+    @kotlin.jvm.JvmName("chooseAiProvider")
     fun setAiProvider(provider: String) {
         val spec = AiProviderCatalog.byId(provider)
         val previousDefault = AiProviderCatalog.byId(aiProvider).defaultModel
@@ -294,10 +296,12 @@ class AppController(private val activity: ComponentActivity) {
         aiTestMessage = null
     }
 
+    @kotlin.jvm.JvmName("applyAiModelInput")
     fun setAiModel(value: String) {
         aiModel = value
     }
 
+    @kotlin.jvm.JvmName("applyAiEndpointInput")
     fun setAiEndpoint(value: String) {
         aiEndpoint = value
     }
@@ -365,7 +369,7 @@ class AppController(private val activity: ComponentActivity) {
     fun isTermuxInstalled(): Boolean = TermuxDispatcher.isInstalled(activity)
 
     fun termuxSetupCommand(): String =
-        "mkdir -p ~/.termux && grep -q '^allow-external-apps=true' ~/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps=true' >> ~/.termux/termux.properties; termux-reload-settings; curl -fsSL https://raw.githubusercontent.com/mazharmnzoor4227-beep/Repo-doctor/main/termux-bridge/repopilot-bridge -o \\$PREFIX/bin/repopilot-bridge && chmod +x \\$PREFIX/bin/repopilot-bridge"
+        "mkdir -p ~/.termux && grep -q '^allow-external-apps=true' ~/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps=true' >> ~/.termux/termux.properties; termux-reload-settings; curl -fsSL https://raw.githubusercontent.com/mazharmnzoor4227-beep/Repo-doctor/main/termux-bridge/repopilot-bridge -o \$PREFIX/bin/repopilot-bridge && chmod +x \$PREFIX/bin/repopilot-bridge"
 
     fun copyTermuxSetup() {
         copyToClipboard("RepoPilot Termux setup", termuxSetupCommand())
