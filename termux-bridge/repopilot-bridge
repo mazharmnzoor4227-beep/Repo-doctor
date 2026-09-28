@@ -105,6 +105,12 @@ case "$cmd" in
     fi
     say "SCAN_COMPLETE"
   ;;
+  fix-gradlew-permission)
+    r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
+    [ -f "$r/gradlew" ] || fail "gradlew is missing"
+    chmod +x -- "$r/gradlew"
+    say "FIXED: gradlew is executable"
+  ;;
   build|test)
     r="$(repo_root "${1:-}")"; assert_repo_safe "$r"
     [ -f "$r/gradlew" ] || fail "gradlew is missing"
